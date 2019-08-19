@@ -3,7 +3,10 @@ import { RouteComponentProps } from "react-router-dom";
 import createStyles from '@material-ui/core/styles/createStyles';
 import withStyles, { WithStyles } from '@material-ui/core/styles/withStyles';
 import Grid from '@material-ui/core/Grid';
-import { API, Auth } from 'aws-amplify';
+import { API, graphqlOperation, Auth } from "aws-amplify";
+import * as queries from "./graphql/queries.js";
+import * as mutations from "./graphql/mutations.js";
+import * as subscriptions from "./graphql/subscriptions.js";
 import { LineChart, Line, CartesianGrid, XAxis, YAxis, Tooltip, Label } from 'recharts';
 
 import MediaCard from './MediaCard';
@@ -21,9 +24,7 @@ const styles = (theme: any) => createStyles({
 });
 
 type stockResponse = {
-    _source: {
-        stockValue: string
-    }
+    stock_value: string
 };
 
 interface State {
@@ -37,7 +38,9 @@ interface State {
         company_description: string
     },
     simulate: boolean,
-    simulation: number
+    simulation: number,
+    stockSubscription: {
+}
 }
 
 interface StyleProps extends WithStyles<typeof styles> {}
@@ -55,7 +58,10 @@ class StockDetail extends Component<Props, State> {
         authParams: { headers: { Authorization: "" }, response: false },
         company: { stock_value: 0, company_name: "", company_description: ""},
         simulate: false,
-        simulation: 0
+        simulation: 0,
+        stockSubscription: {
+    unsubscribe: () => {}
+}
     }
 
     constructor(props: Props) {
@@ -71,29 +77,62 @@ class StockDetail extends Component<Props, State> {
         this.onSimulate = this.onSimulate.bind(this);
         this.stopAutoRefresh = this.stopAutoRefresh.bind(this);
         this.onAutoRefresh = this.onAutoRefresh.bind(this);
+        // Bind the function that will receive the subscription updates
+        this.onStock = this.onStock.bind(this);
+        // Initiate the AppSync subscription
+        this.state.stockSubscription = API.graphql(graphqlOperation(subscriptions.SubscribeToStock))
+    //@ts-ignore
+    .subscribe({
+        next: this.onStock
+    });
+    }
+
+        async onStock({ value }: any) {
+        console.log("On Stock change: ", value.data);
+        const newComp = {
+            ...this.state.company,
+            stock_value: value.data.onStockChange.stock_value
+        };
+        this.setState({
+            company: newComp
+        });
+        await this.retrieveStock();
     }
 
     async retrieveStock() {
-        const res = await API.get('companies', `/company/${this.state.id}/stock`, this.state.authParams);
-        const stockData = res.data.map((r: stockResponse) => ({ data: 'Today', price: Number(r._source.stockValue) }));
+        //@ts-ignore
+        const { data } = await API.graphql(
+            graphqlOperation(queries.GetHistogram, {
+                company_id: this.state.id,
+                limit: 10
+            })
+        );
+        console.log(data.stockHistogram);
+        const stockData = data.stockHistogram.map((r: stockResponse) => ({
+            date: "Today",
+            price: Number(r.stock_value)
+        }));
         this.setState({ stockData });
     }
 
     async componentDidMount() {
-        const session = await Auth.currentSession();
-        this.setState({
-            authParams: {
-                headers: { "Authorization": session.getIdToken().getJwtToken() },
-                response: true
-            }
-        });
-        this.retrieveStock();
-        const { data } = await API.get('companies', `/company/${this.state.id}`, this.state.authParams);
-        this.setState({ company: data.Item });
+    this.retrieveStock();
+    const session = await Auth.currentSession();
+    this.setState({
+        authParams: {
+            headers: { Authorization: session.getIdToken().getJwtToken() },
+            response: true
+        }
+    });
+    //@ts-ignore
+    const { data } = await API.graphql(
+        graphqlOperation(queries.GetCompany, { id: this.state.id })
+        );
+    this.setState({ company: data.getCompany });
     }
 
     componentWillUnmount() {
-        this.stopAutoRefresh();
+        this.state.stockSubscription.unsubscribe();
     }
 
     onAutoRefresh(autorefresh: boolean) {
@@ -113,9 +152,14 @@ class StockDetail extends Component<Props, State> {
         window.clearInterval(this.state.interval);
     }
 
-    async onAction() {
-        const { data } = await API.put('companies', `/company/${this.state.id}/stock`, this.state.authParams);
-        const newComp = { ...this.state.company, stock_value: data.Attributes.stock_value };
+     async onAction() {
+        //@ts-ignore
+        const { data } = await API.graphql(
+            graphqlOperation(mutations.UpdateCompanyStock, {
+                company_id: this.state.id
+            })
+        );
+        const newComp = { ...this.state.company, stock_value: data.updateCompanyStock.stock_value };
         this.setState({
             company: newComp
         });
@@ -123,7 +167,7 @@ class StockDetail extends Component<Props, State> {
 
     async onSimulate() {
         this.setState({ simulate: !this.state.simulate });
-        if(this.state.simulate) 
+        if(this.state.simulate)
             return window.clearInterval(this.state.simulation);
 
         this.setState({ simulation: window.setInterval(this.onAction, 5000) });
@@ -138,7 +182,7 @@ class StockDetail extends Component<Props, State> {
                     <YAxis domain={['auto', 'auto']}>
                         <Label angle={90} value="Stock Price" position="insideLeft" style={{textAnchor: "middle" }} />
                     </YAxis>
-                    <Tooltip 
+                    <Tooltip
                         wrapperStyle={{
                             borderColor: "white",
                             boxShadow: "2px 2px 3px 0px rgb(204,204,204)"
